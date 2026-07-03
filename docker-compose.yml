@@ -1,0 +1,14 @@
+version: "3.8"
+
+services:
+  migration-poc:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./config.yaml:/app/config.yaml
+      - ./migration.db:/app/migration.db
+      - ./reports:/app/reports
+    environment:
+      - MIGRATION_CONFIG_PATH=/app/config.yaml
+    restart: unless-stopped

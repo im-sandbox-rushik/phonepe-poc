@@ -1,0 +1,36 @@
+gitlab:
+  url: "https://gitlab.com"
+  pat: "${GITLAB_PAT}"
+  api_version: "v4"
+
+github:
+  url: "https://github.com"
+  pat: "${GITHUB_PAT}"
+  organization: "im-sandbox-rushik"
+
+gei:
+  binary_path: "gh"
+
+sync:
+  interval_hours: 6
+  retry_count: 3
+  retry_delay_seconds: 2
+
+validation:
+  schedule_cron: "0 2 * * *"
+
+# Set to true to run without real GitLab/GHES (uses simulated data)
+demo_mode: false
+
+repositories:
+  - "ranjiths-infomagnus-group/unique-nuget-package"
+  - "ranjiths-infomagnus-group/shared-lib"
+  - "ranjiths-infomagnus-group/dummy_aws_project"
+  - "ranjiths-infomagnus-group/gitlab-game-demo"
+  - "ranjiths-infomagnus-group/ranjith_demo2"
+  - "ranjiths-infomagnus-group/ranjith_demo"
+  - "ranjiths-infomagnus-group/ranjiths-infomagnus-project"
+
+logging:
+  level: "INFO"
+  file: "migration.log"
