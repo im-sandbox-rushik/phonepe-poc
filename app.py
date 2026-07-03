@@ -11,6 +11,7 @@ from scheduler import start_scheduler, shutdown_scheduler
 from api.migrations import router as migrations_router
 from api.sync import router as sync_router
 from api.validation import router as validation_router
+from api.metadata import router as metadata_router
 
 
 config = load_config()
@@ -48,6 +49,7 @@ app = FastAPI(
 app.include_router(migrations_router, prefix="/migrate", tags=["Migration"])
 app.include_router(sync_router, prefix="/sync", tags=["Synchronization"])
 app.include_router(validation_router, prefix="/validate", tags=["Validation"])
+app.include_router(metadata_router, prefix="/metadata", tags=["Metadata"])
 
 
 @app.get("/status")
