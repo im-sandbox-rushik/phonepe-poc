@@ -64,7 +64,7 @@ GEI (`gh gei migrate-repo`) **does not support GitLab as a source** — it only 
 2. **`git clone --bare`** to get full repo content from GitLab
 3. **`git push --mirror`** to push all refs to GitHub
 
-This approach migrates all git content (commits, branches, tags, refs). GitLab-specific metadata (Merge Requests, Issues, CI/CD configs) requires separate API-based migration which is outside this POC scope.
+This approach migrates all git content (commits, branches, tags, refs). GitLab-specific metadata is migrated via dedicated API-based services (see Metadata Migration below).
 
 ---
 
@@ -123,6 +123,8 @@ docker-compose up --build
 
 ## API Endpoints
 
+### Core Migration
+
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/migrate` | Initial migration (clone from GitLab, push to GitHub) |
@@ -131,6 +133,22 @@ docker-compose up --build
 | `POST` | `/sync/cutover` | Full cutover: freeze → sync → validate → enable |
 | `GET` | `/status` | Migration status overview |
 | `GET` | `/report` | Detailed migration report |
+
+### Metadata Migration
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/metadata` | Migrate ALL metadata (labels, issues, MRs, wiki, CI/CD, webhooks, permissions) |
+| `POST` | `/metadata/labels` | Labels only |
+| `POST` | `/metadata/issues` | Issues + labels + milestones + comments |
+| `POST` | `/metadata/merge-requests` | MRs → PRs with comments |
+| `POST` | `/metadata/releases` | Releases with asset links |
+| `POST` | `/metadata/wiki` | Wiki (git-based migration) |
+| `POST` | `/metadata/cicd` | CI/CD (.gitlab-ci.yml → GitHub Actions) |
+| `POST` | `/metadata/webhooks` | Webhooks with event mapping |
+| `POST` | `/metadata/permissions` | Members → collaborators/teams |
+
+All metadata endpoints accept optional `{"repository": "repo-name"}` to target a single repo, or `{}` for all repos.
 
 ---
 
@@ -212,7 +230,30 @@ curl http://localhost:8000/status
 }
 ```
 
-### Step 5: Cutover
+### Step 5: Metadata Migration
+
+```bash
+curl -X POST http://localhost:8000/metadata
+```
+
+**Response (tested live):**
+```json
+{
+  "repository": "gitlab-game-demo",
+  "labels": {"total": 1, "migrated": 1},
+  "milestones": {"total": 1, "migrated": 1},
+  "issues": {"total": 1, "migrated": 1},
+  "merge_requests": {"total": 0, "migrated": 0},
+  "releases": {"total": 0, "migrated": 0},
+  "wiki": {"status": "skipped", "reason": "Wiki is empty"},
+  "cicd": {"status": "migrated", "workflow_file": ".github/workflows/ci.yml", "jobs_converted": 3},
+  "webhooks": {"total": 0, "migrated": 0},
+  "permissions": {"total": 5, "migrated": 5},
+  "execution_time": "28s"
+}
+```
+
+### Step 6: Cutover
 
 ```bash
 curl -X POST http://localhost:8000/sync/cutover
@@ -273,35 +314,143 @@ pytest -v
 
 ---
 
+## Metadata Migration Details
+
+### What Gets Migrated
+
+| Data Type | Source (GitLab) | Target (GitHub) | Method |
+|-----------|----------------|-----------------|--------|
+| Code + History | Repository | Repository | `git clone --bare` + `git push --mirror` |
+| Branches | All branches | All branches | git mirror |
+| Tags | All tags | All tags | git mirror |
+| Labels | Project labels | Repo labels | GitLab API → GitHub API |
+| Milestones | Project milestones | Repo milestones | GitLab API → GitHub API |
+| Issues | Issues + comments | Issues + comments | GitLab API → GitHub API |
+| Merge Requests | Open MRs → PRs, Closed MRs → Issues | PRs / Issues | GitLab API → GitHub API |
+| Releases | Releases + asset links | Releases | GitLab API → GitHub API |
+| Wiki | Wiki git repo | Wiki git repo | `git clone` + `git push` |
+| CI/CD | `.gitlab-ci.yml` | `.github/workflows/ci.yml` | YAML conversion |
+| Webhooks | Project hooks | Repo hooks | GitLab API → GitHub API |
+| Permissions | Members + roles | Collaborators + permissions | GitLab API → GitHub API |
+
+### Permission Role Mapping
+
+| GitLab Role | Access Level | GitHub Permission |
+|-------------|-------------|-------------------|
+| Guest | 10 | `pull` (read) |
+| Reporter | 20 | `pull` (read) |
+| Developer | 30 | `push` (write) |
+| Maintainer | 40 | `maintain` |
+| Owner | 50 | `admin` |
+
+### CI/CD Conversion Mapping
+
+| GitLab CI | GitHub Actions |
+|-----------|----------------|
+| `stages` | Job dependencies (`needs`) |
+| `image` | `container.image` |
+| `script` | `steps[].run` |
+| `services` | `services` containers |
+| `artifacts.paths` | `actions/upload-artifact@v4` |
+| `cache.paths` | `actions/cache@v4` |
+| `only/rules` | `if` conditions |
+| `allow_failure` | `continue-on-error` |
+
+### Webhook Event Mapping
+
+| GitLab Event | GitHub Event |
+|-------------|-------------|
+| `push_events` | `push` |
+| `merge_requests_events` | `pull_request` |
+| `issues_events` | `issues` |
+| `tag_push_events` | `create` |
+| `pipeline_events` | `workflow_run` |
+| `note_events` | `issue_comment` |
+| `releases_events` | `release` |
+
+---
+
+## Live Metadata Test Results (July 3, 2026)
+
+| Repository | Labels | Milestones | Issues | MRs | CI/CD | Permissions |
+|-----------|--------|-----------|--------|-----|-------|-------------|
+| unique-nuget-package | 0/0 | 1/1 ✅ | 0/0 | 0/0 | ✅ migrated | 5/5 ✅ |
+| shared-lib | 0/0 | 1/1 ✅ | 0/0 | 0/0 | skipped | 5/5 ✅ |
+| dummy_aws_project | 1/4 ✅ | 2/2 ✅ | 9/9 ✅ | 1/1 ✅ | ✅ migrated | 5/5 ✅ |
+| gitlab-game-demo | 0/1 | 0/1 | 1/1 ✅ | 0/0 | ✅ migrated (3 jobs) | 5/5 ✅ |
+| ranjith_demo2 | 0/0 | 1/1 ✅ | 0/0 | 0/0 | ✅ migrated | 5/5 ✅ |
+| ranjith_demo | 0/0 | 1/1 ✅ | 0/0 | 0/0 | ✅ migrated | 5/5 ✅ |
+| ranjiths-infomagnus-project | 0/0 | 1/1 ✅ | 0/0 | 0/0 | ✅ migrated | 5/5 ✅ |
+
+**Total execution time: 197 seconds for all 7 repos**
+
+---
+
 ## Project Structure
 
 ```
 migration-poc/
-├── app.py                      # FastAPI application entry point
-├── config.py                   # Configuration loader (YAML)
-├── config.yaml                 # Credentials and repo list
-├── database.py                 # SQLAlchemy + SQLite setup
-├── models.py                   # Repository, MigrationLog models
-├── scheduler.py                # APScheduler (6h sync, daily validation)
+├── app.py                              # FastAPI application entry point
+├── config.py                           # Configuration loader (YAML)
+├── config.yaml                         # Credentials and repo list
+├── database.py                         # SQLAlchemy + SQLite setup
+├── models.py                           # Repository, MigrationLog models
+├── scheduler.py                        # APScheduler (6h sync, daily validation)
 ├── services/
-│   ├── factory.py              # Service factory (real vs demo mode)
-│   ├── gitlab_service.py       # GitLab REST API client
-│   ├── github_service.py       # GitHub REST API client
-│   ├── gei_service.py          # Migration engine (create repo + git mirror)
-│   ├── git_service.py          # Git operations (fetch, push --mirror)
-│   ├── sync_service.py         # Sync orchestrator with retry
-│   ├── validation_service.py   # SHA/branch/tag validation
-│   └── demo_services.py        # Mock services for demo mode
+│   ├── factory.py                      # Service factory (real vs demo mode)
+│   ├── gitlab_service.py               # GitLab REST API client
+│   ├── github_service.py               # GitHub REST API client
+│   ├── gei_service.py                  # Migration engine (create repo + git mirror)
+│   ├── git_service.py                  # Git operations (fetch, push --mirror)
+│   ├── sync_service.py                 # Sync orchestrator with retry
+│   ├── validation_service.py           # SHA/branch/tag validation
+│   ├── demo_services.py                # Mock services for demo mode
+│   ├── metadata_migration_service.py   # Full metadata orchestrator
+│   ├── mr_migration_service.py         # MR → PR migration + comments
+│   ├── issues_migration_service.py     # Issues + labels + milestones
+│   ├── permissions_migration_service.py # Members → collaborators/teams
+│   ├── wiki_migration_service.py       # Wiki git migration
+│   ├── releases_migration_service.py   # Releases + assets
+│   ├── cicd_migration_service.py       # .gitlab-ci.yml → GitHub Actions
+│   └── webhooks_migration_service.py   # Webhook event mapping
 ├── api/
-│   ├── migrations.py           # POST /migrate
-│   ├── sync.py                 # POST /sync, POST /sync/cutover
-│   └── validation.py           # POST /validate
+│   ├── migrations.py                   # POST /migrate
+│   ├── sync.py                         # POST /sync, POST /sync/cutover
+│   ├── validation.py                   # POST /validate
+│   └── metadata.py                     # POST /metadata (all types)
 ├── tests/
-│   └── test_migration.py       # Unit tests (9 tests)
+│   └── test_migration.py               # Unit tests (9 tests)
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt
 └── README.md
+```
+
+---
+
+## Complete Migration Flow
+
+```
+Start POC
+  │
+  ├─► POST /migrate          # Clone from GitLab, push to GitHub (all branches, tags, commits)
+  │
+  ├─► POST /metadata         # Migrate all metadata:
+  │     ├── Labels              - Project labels → Repo labels
+  │     ├── Milestones          - Milestones with due dates
+  │     ├── Issues              - Issues + comments + state
+  │     ├── Merge Requests      - MRs → PRs/Issues + comments
+  │     ├── Releases            - Releases + asset links
+  │     ├── Wiki                - Wiki git repo clone/push
+  │     ├── CI/CD              - .gitlab-ci.yml → GitHub Actions
+  │     ├── Webhooks            - Hooks with event mapping
+  │     └── Permissions         - Members → collaborators
+  │
+  ├─► Scheduler runs every 6h  # Incremental sync (detect changes, mirror)
+  │
+  ├─► POST /validate           # Verify SHA, branches, tags match
+  │
+  └─► POST /sync/cutover       # Final: freeze → sync → validate → enable
 ```
 
 ---
@@ -317,4 +466,5 @@ To support thousands of repositories:
 5. Deploy on Kubernetes with horizontal scaling
 6. Add webhook listeners for real-time change detection
 7. Implement proper secret management (Vault/Azure KeyVault)
-8. Add GitLab metadata migration (MRs → PRs, Issues) via API
+8. Add LFS object migration for large binary files
+9. Add parallel metadata migration (currently sequential per repo)
