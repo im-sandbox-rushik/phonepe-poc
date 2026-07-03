@@ -166,6 +166,111 @@ Cutover is designed as a **checkpoint** — either fully succeeds or fully rever
 
 ---
 
+### Alternative Approach — GitLab Native Exporter for Phase 1
+
+We evaluated a **second approach** for Phase 1 using GitLab's native project export API. Both approaches are **implemented and tested in the POC**. This section presents both so PhonePe can choose based on priorities.
+
+#### Approach B: Export-Based Phase 1
+
+Instead of scraping metadata via individual API calls, use GitLab's built-in project export which packages **everything** into a single `.tar.gz`:
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│              PHASE 1 — EXPORT-BASED (Alternative)                     │
+├──────────────────────────────────────────────────────────────────────┤
+│                                                                       │
+│  ┌─────────────┐   POST /projects/:id/export   ┌─────────────┐      │
+│  │   GitLab    │ ──────────────────────────►   │  Migration   │      │
+│  │   On-Prem   │   .tar.gz (bundle + ndjson)   │   Engine     │      │
+│  └─────────────┘                                │              │      │
+│                                                 │  Extract →   │      │
+│                                                 │  Push bundle │      │
+│                                                 │  Create meta │      │
+│                                                 └──────┬───────┘      │
+│                                                        ▼              │
+│                                                 ┌─────────────┐      │
+│                                                 │    GHES     │      │
+│                                                 │   On-Prem   │      │
+│                                                 └─────────────┘      │
+│                                                                       │
+│  Export archive contains:                                             │
+│    project.bundle          — git bundle (all commits/branches/tags)  │
+│    wiki.bundle             — wiki git bundle                         │
+│    tree/project/*.ndjson   — all metadata (issues, MRs, labels, ...) │
+│    uploads/                — attached files/images                   │
+│    lfs-objects/            — LFS objects (bundled)                   │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+Phase 2 (continuous sync) and Phase 3 (cutover) remain **identical** to Approach A — export is only used for the initial one-time migration.
+
+#### Data Types: Approach A vs Approach B
+
+| Data Type | Approach A (API) | Approach B (Export) |
+|-----------|------------------|---------------------|
+| Commits, branches, tags | ✅ git push --mirror | ✅ from project.bundle |
+| Issues + comments | ✅ | ✅ |
+| Merge Requests + comments | ✅ | ✅ |
+| Labels | ✅ | ✅ |
+| Milestones | ✅ | ✅ |
+| Releases | ✅ | ✅ |
+| Webhooks | ✅ | ✅ |
+| Permissions/members | ✅ | ✅ |
+| Wiki | ⚠️ Needs manual init on GitHub | ✅ from wiki.bundle (reliable) |
+| **CI/CD variables** | ❌ Not covered | ✅ **In export** |
+| **Snippets** | ❌ Not covered | ✅ **In export** |
+| **Boards** | ❌ Not covered | ✅ **In export** |
+| **Protected branches/tags** | ❌ Not covered | ✅ **In export** |
+| **Integrations (Slack/JIRA)** | ❌ Not covered | ✅ **In export (as JSON)** |
+| **Attachments/uploads** | ❌ Not covered | ✅ **In export** |
+| **LFS objects** | ⚠️ Manual | ✅ **In export** |
+| **Pipeline history** | ❌ Not covered | ✅ **In export (audit trail)** |
+
+**Approach B captures 8 additional data types automatically.**
+
+#### Trade-off Comparison
+
+| Dimension | Approach A (API-based) | Approach B (Export-based) |
+|-----------|------------------------|---------------------------|
+| **Speed per repo** | ~30 seconds | 2-10 minutes (async export queue) |
+| **Total for 3,000 repos** | 8-10 weeks | 13-17 weeks |
+| **Cutover freeze window** | < 5 minutes | < 10 minutes (final export takes longer) |
+| **Data completeness** | 12 data types | 20 data types |
+| **Load on GitLab** | Many small API calls (rate-limited) | Heavy CPU/IO per export (admin coordination) |
+| **Load on migration engine** | Low CPU, low disk | High disk (.tar.gz can be GBs per repo) |
+| **Reliability** | High — failures isolated per API call | Medium — one bad export = restart whole thing |
+| **GitLab tier required** | Any (Free works) | Some export features may need Premium |
+| **Prerequisite** | Read PAT | Read PAT + admin enables export feature |
+| **Debuggability** | Easy (per-API logs) | Harder (tar + ndjson parsing) |
+| **Code complexity** | ~1,500 LoC | ~2,200 LoC (adds tar handling, ndjson parser) |
+| **Incremental sync (Phase 2)** | ✅ Works (git mirror) | ✅ Works (Phase 2 unchanged) |
+
+#### Recommendation for PhonePe
+
+**Recommended: HYBRID** — use both, per-repo, based on repo characteristics:
+
+| Repo Type | Recommended Approach | Reason |
+|-----------|---------------------|--------|
+| Standard repos (no LFS, simple metadata) | **Approach A (API)** — ~90% of repos | Faster, simpler, keeps 8-10 week timeline |
+| Repos with critical CI/CD variables | **Approach B (Export)** | Captures variables automatically |
+| Repos with LFS > 1 GB | **Approach B (Export)** | Bundled LFS is safer than separate transfer |
+| Repos with active boards/protected branches | **Approach B (Export)** | Captures these automatically |
+| Repos with snippets or integrations | **Approach B (Export)** | Only export captures these |
+
+**Decision authority:** PhonePe SME per team picks approach A or B for their repos.
+
+**Impact on timeline:**
+- If ≤ 20% of repos need Approach B: total timeline stays ~10-11 weeks
+- If > 50% need Approach B: total timeline grows to ~14-16 weeks
+
+**Both approaches are already built and tested in the POC:**
+- `POST /migrate` — API-based (Approach A)
+- `POST /export-migrate` — Export-based (Approach B)
+
+No additional development needed to make the choice per repo.
+
+---
+
 ## Solution 2: Pipeline Conversion (Achieving 95%+ Conversion)
 
 ### The Challenge
